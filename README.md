@@ -2,6 +2,24 @@
 
 Backend API untuk studi kasus e-commerce skala kecil, dibangun dengan Node.js, Express, TypeScript, Prisma, dan MySQL.
 
+---
+
+## 📸 Antarmuka Integrasi Pembayaran & Backoffice
+
+<p align="center">
+  <img src="screenshots/foto3_integrasi_pembayaran_midtrans.png" alt="Simulasi Integrasi Payment Gateway" width="80%" />
+  <br/>
+  <em>Integrasi Payment Gateway Simulasi Webhook & Status Callback (Midtrans)</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/foto4_admin_order_backoffice.png" alt="Admin Order Backoffice" width="90%" />
+  <br/>
+  <em>Dashboard Pemantauan & Update Status Siklus Pesanan (Pending, Paid, Shipped, Cancelled)</em>
+</p>
+
+---
+
 ## Stack
 
 - Node.js + Express
