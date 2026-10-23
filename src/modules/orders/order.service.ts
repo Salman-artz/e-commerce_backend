@@ -49,136 +49,196 @@ function normalizeGatewayPaymentStatus(status: PaymentStatus | string): PaymentS
 
 export const orderService = {
   async checkout(userId: number, input: CheckoutInput) {
-    const result = await prisma.$transaction(async (tx) => {
-      let itemsToCheckout: any[] = [];
-      let cart: any = null;
+    const maxRetries = 3;
+    let attempt = 0;
 
-      if (input.directPurchase) {
-        const product = await tx.product.findUnique({
-          where: { id: input.directPurchase.productId }
-        });
-        
-        if (!product) {
-          throw new AppError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
-        }
+    while (attempt < maxRetries) {
+      attempt++;
+      try {
+        const result = await prisma.$transaction(async (tx) => {
+          let itemsToCheckout: any[] = [];
+          let cart: any = null;
 
-        itemsToCheckout = [{
-          id: -1, // dummy id
-          productId: product.id,
-          quantity: input.directPurchase.quantity,
-          product
-        }];
-      } else {
-        cart = await cartRepository.getCartWithItemsTx(tx, userId);
-        itemsToCheckout = cart?.items || [];
-        
-        if (input.cartItemIds && input.cartItemIds.length > 0) {
-          itemsToCheckout = itemsToCheckout.filter(item => input.cartItemIds!.includes(item.id));
-        }
-
-        if (!cart || itemsToCheckout.length === 0) {
-          throw new AppError(400, 'CART_EMPTY', 'No items selected for checkout');
-        }
-      }
-
-      const address = input.addressId
-        ? await tx.address.findFirst({
-            where: {
-              id: input.addressId,
-              userId
+          if (input.directPurchase) {
+            const product = await tx.product.findUnique({
+              where: { id: input.directPurchase.productId }
+            });
+            
+            if (!product) {
+              throw new AppError(404, 'PRODUCT_NOT_FOUND', 'Produk tidak ditemukan');
             }
-          })
-        : await tx.address.findFirst({
-            where: {
+
+            itemsToCheckout = [{
+              id: -1, // dummy id
+              productId: product.id,
+              quantity: input.directPurchase.quantity,
+              product
+            }];
+          } else {
+            cart = await cartRepository.getCartWithItemsTx(tx, userId);
+            itemsToCheckout = cart?.items || [];
+            
+            if (input.cartItemIds && input.cartItemIds.length > 0) {
+              itemsToCheckout = itemsToCheckout.filter(item => input.cartItemIds!.includes(item.id));
+            }
+
+            if (!cart || itemsToCheckout.length === 0) {
+              throw new AppError(400, 'CART_EMPTY', 'Tidak ada barang yang dipilih untuk checkout');
+            }
+          }
+
+          const address = input.addressId
+            ? await tx.address.findFirst({
+                where: {
+                  id: input.addressId,
+                  userId
+                }
+              })
+            : await tx.address.findFirst({
+                where: {
+                  userId,
+                  isDefault: true
+                },
+                orderBy: { createdAt: 'desc' }
+              }) ?? await tx.address.findFirst({
+                where: { userId },
+                orderBy: { createdAt: 'asc' }
+              });
+
+          if (!address) {
+            throw new AppError(400, 'ADDRESS_REQUIRED', 'Alamat pengiriman wajib dipilih');
+          }
+
+          // 1. PESSIMISTIC LOCKING WITH DEADLOCK PREVENTION:
+          // Sort unique product IDs ascending so that all concurrent transactions acquire row locks in identical sequence.
+          const sortedProductIds = Array.from(new Set(itemsToCheckout.map(item => Number(item.productId)))).sort((a, b) => a - b);
+          const lockedProductsMap = new Map<number, any>();
+          for (const pid of sortedProductIds) {
+            const rows: any[] = await tx.$queryRaw`SELECT id, name, price, stock, status FROM products WHERE id = ${pid} FOR UPDATE`;
+            if (rows && rows.length > 0) {
+              lockedProductsMap.set(pid, rows[0]);
+            }
+          }
+
+          // 2. VERIFIKASI STOK TERBARU & PENGURANGAN STOK SECARA ATOMIK:
+          for (const item of itemsToCheckout) {
+            const freshProduct = lockedProductsMap.get(item.productId);
+
+            if (!freshProduct) {
+              throw new AppError(404, 'PRODUCT_NOT_FOUND', `Produk #${item.productId} tidak ditemukan`);
+            }
+
+            if (freshProduct.status !== ProductStatus.ACTIVE) {
+              throw new AppError(400, 'PRODUCT_NOT_AVAILABLE', `Produk "${freshProduct.name}" saat ini tidak tersedia untuk dipesan`);
+            }
+
+            if (freshProduct.stock < item.quantity) {
+              if (freshProduct.stock <= 0) {
+                throw new AppError(
+                  400,
+                  'INSUFFICIENT_STOCK',
+                  `Maaf, stok produk "${freshProduct.name}" baru saja habis dibeli oleh pelanggan lain.`
+                );
+              } else {
+                throw new AppError(
+                  400,
+                  'INSUFFICIENT_STOCK',
+                  `Maaf, sisa stok produk "${freshProduct.name}" hanya tinggal ${freshProduct.stock} item (pesanan Anda: ${item.quantity}).`
+                );
+              }
+            }
+
+            // Kurangi stok dan update status ke OUT_OF_STOCK jika stok menjadi 0
+            const newStock = freshProduct.stock - item.quantity;
+            await tx.product.update({
+              where: { id: item.productId },
+              data: {
+                stock: newStock,
+                status: newStock === 0 ? ProductStatus.OUT_OF_STOCK : ProductStatus.ACTIVE
+              }
+            });
+
+            // Update referensi produk untuk snapshot order
+            item.product = freshProduct;
+          }
+
+          const shippingCost = input.shippingCost || 0;
+          const totalAmount = (
+            itemsToCheckout.reduce((sum, item) => sum + Number(item.product.price) * item.quantity, 0)
+            + shippingCost
+          ).toFixed(2);
+
+          const order = await tx.order.create({
+            data: {
               userId,
-              isDefault: true
+              addressId: address.id,
+              status: OrderStatus.PENDING,
+              totalAmount,
+              shippingCost,
+              items: {
+                create: itemsToCheckout.map((item) => ({
+                  productId: item.productId,
+                  productNameSnapshot: item.product.name,
+                  priceSnapshot: item.product.price,
+                  quantity: item.quantity
+                }))
+              }
             },
-            orderBy: { createdAt: 'desc' }
-          }) ?? await tx.address.findFirst({
-            where: { userId },
-            orderBy: { createdAt: 'asc' }
+            include: {
+              items: true,
+              payment: true,
+              address: true,
+              user: true
+            }
           });
 
-      if (!address) {
-        throw new AppError(400, 'ADDRESS_REQUIRED', 'Shipping address is required');
-      }
+          const payment = await tx.payment.create({
+            data: {
+              orderId: order.id,
+              method: input.paymentMethod,
+              status: PaymentStatus.PENDING,
+              gatewayReference: `${input.paymentMethod.toLowerCase()}-${order.id}-${Date.now()}`
+            }
+          });
 
-      const shippingCost = input.shippingCost || 0;
-      const totalAmount = (
-        itemsToCheckout.reduce((sum, item) => sum + Number(item.product.price) * item.quantity, 0)
-        + shippingCost
-      ).toFixed(2);
-
-      for (const item of itemsToCheckout) {
-        if (item.product.status !== ProductStatus.ACTIVE) {
-          throw new AppError(400, 'PRODUCT_NOT_AVAILABLE', `Product ${item.product.name} is not available`);
-        }
-
-        const updated = await tx.product.updateMany({
-          where: {
-            id: item.productId,
-            stock: { gte: item.quantity },
-            status: ProductStatus.ACTIVE
-          },
-          data: {
-            stock: { decrement: item.quantity },
-            ...(item.quantity === item.product.stock ? { status: ProductStatus.OUT_OF_STOCK } : {})
+          if (cart) {
+            const checkedOutItemIds = itemsToCheckout.map(item => item.id);
+            await tx.cartItem.deleteMany({ 
+              where: { 
+                cartId: cart.id,
+                id: { in: checkedOutItemIds }
+              } 
+            });
           }
+
+          return { order, payment };
         });
 
-        if (updated.count === 0) {
-          throw new AppError(400, 'INSUFFICIENT_STOCK', `Insufficient stock for ${item.product.name}`);
+        const finalOrder = await orderRepository.findById(result.order.id);
+        return serializeOrder(finalOrder);
+      } catch (err) {
+        if (err instanceof AppError) {
+          throw err;
         }
+
+        const isLockConflict = 
+          err?.code === 'P2034' || 
+          String(err?.message || '').toLowerCase().includes('deadlock') || 
+          String(err?.message || '').toLowerCase().includes('lock wait timeout');
+
+        if (isLockConflict && attempt < maxRetries) {
+          // Jitter delay (30ms - 80ms) sebelum mencoba kembali
+          await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 50) + 30));
+          continue;
+        }
+
+        if (isLockConflict) {
+          throw new AppError(409, 'CONCURRENT_CHECKOUT_CONFLICT', 'Sistem sedang memproses transaksi bersamaan untuk produk ini. Silakan ulangi beberapa saat lagi.');
+        }
+
+        throw err;
       }
-
-      const order = await tx.order.create({
-        data: {
-          userId,
-          addressId: address.id,
-          status: OrderStatus.PENDING,
-          totalAmount,
-          shippingCost,
-          items: {
-            create: itemsToCheckout.map((item) => ({
-              productId: item.productId,
-              productNameSnapshot: item.product.name,
-              priceSnapshot: item.product.price,
-              quantity: item.quantity
-            }))
-          }
-        },
-        include: {
-          items: true,
-          payment: true,
-          address: true,
-          user: true
-        }
-      });
-
-      const payment = await tx.payment.create({
-        data: {
-          orderId: order.id,
-          method: input.paymentMethod,
-          status: PaymentStatus.PENDING,
-          gatewayReference: `${input.paymentMethod.toLowerCase()}-${order.id}-${Date.now()}`
-        }
-      });
-
-      if (cart) {
-        const checkedOutItemIds = itemsToCheckout.map(item => item.id);
-        await tx.cartItem.deleteMany({ 
-          where: { 
-            cartId: cart.id,
-            id: { in: checkedOutItemIds }
-          } 
-        });
-      }
-
-      return { order, payment };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-
-    const finalOrder = await orderRepository.findById(result.order.id);
-    return serializeOrder(finalOrder);
+    }
   },
 
   async listOrders(userId: number, role: Role, query: OrderQueryInput) {
@@ -351,11 +411,24 @@ export const orderService = {
       const order = await tx.order.findUnique({ where: { id: orderId } });
       if (!order) throw new AppError(404, 'ORDER_NOT_FOUND', 'Order not found');
       
-      const payment = await tx.payment.findUnique({ where: { orderId } });
-      if (!payment) throw new AppError(404, 'PAYMENT_NOT_FOUND', 'Payment not found');
+      let payment = await tx.payment.findUnique({ where: { orderId } });
+      if (!payment) {
+        payment = await tx.payment.create({
+          data: {
+            orderId: order.id,
+            method: PaymentMethod.MIDTRANS,
+            status: PaymentStatus.PENDING,
+            gatewayReference: `midtrans-${order.id}-${Date.now()}`
+          }
+        });
+      }
+
+      if (order.status === OrderStatus.PROCESSING || order.status === OrderStatus.PAID) {
+        return serializeOrder(order);
+      }
 
       if (order.status !== OrderStatus.PENDING) {
-        throw new AppError(400, 'ORDER_NOT_PENDING', 'Order is not pending');
+        throw new AppError(400, 'ORDER_NOT_PENDING', `Status pesanan adalah ${order.status}, tidak dapat diproses.`);
       }
 
       await tx.payment.update({

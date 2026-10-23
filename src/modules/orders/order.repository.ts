@@ -3,6 +3,15 @@ import { prisma } from '../../config/prisma';
 
 const orderInclude = {
   items: {
+    include: {
+      product: {
+        include: {
+          images: {
+            orderBy: { id: 'asc' as const }
+          }
+        }
+      }
+    },
     orderBy: { createdAt: 'asc' as const }
   },
   payment: true,

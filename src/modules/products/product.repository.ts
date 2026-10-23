@@ -26,11 +26,11 @@ export const productRepository = {
     return prisma.product.count({ where });
   },
 
-  findMany(where: Prisma.ProductWhereInput, skip: number, take: number) {
+  findMany(where: Prisma.ProductWhereInput, skip: number, take: number, orderBy?: Prisma.ProductOrderByWithRelationInput[]) {
     return prisma.product.findMany({
       where,
       include: productInclude,
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      orderBy: orderBy && orderBy.length ? orderBy : [{ createdAt: 'desc' }, { id: 'desc' }],
       skip,
       take
     });
@@ -136,6 +136,9 @@ export const productRepository = {
     if (filters.status) {
       where.status = filters.status;
     }
+
+    // Pastikan produk yang ditampilkan wajib memiliki minimal 1 gambar
+    where.images = { some: {} };
 
     if (filters.minPrice !== undefined || filters.maxPrice !== undefined) {
       where.price = {

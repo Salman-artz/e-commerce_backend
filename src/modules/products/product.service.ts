@@ -1,4 +1,4 @@
-import { ProductStatus } from '@prisma/client';
+import { Prisma, ProductStatus } from '@prisma/client';
 import { cloudinary, cloudinaryConfigured } from '../../config/cloudinary';
 import fs from 'fs/promises';
 import path from 'path';
@@ -151,9 +151,22 @@ export const productService = {
       status: query.status
     });
 
+    const sortOption = query.sortBy || query.sort;
+    let orderBy: Prisma.ProductOrderByWithRelationInput[] = [{ createdAt: 'desc' }, { id: 'desc' }];
+
+    if (sortOption === 'price_asc' || sortOption === 'price-asc') {
+      orderBy = [{ price: 'asc' }, { id: 'asc' }];
+    } else if (sortOption === 'price_desc' || sortOption === 'price-desc') {
+      orderBy = [{ price: 'desc' }, { id: 'desc' }];
+    } else if (sortOption === 'oldest') {
+      orderBy = [{ createdAt: 'asc' }, { id: 'asc' }];
+    } else if (sortOption === 'newest') {
+      orderBy = [{ createdAt: 'desc' }, { id: 'desc' }];
+    }
+
     const [totalItems, items] = await Promise.all([
       productRepository.count(where),
-      productRepository.findMany(where, (query.page - 1) * query.limit, query.limit)
+      productRepository.findMany(where, (query.page - 1) * query.limit, query.limit, orderBy)
     ]);
 
     return {

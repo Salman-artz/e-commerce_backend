@@ -17,7 +17,9 @@ export const productQuerySchema = z.object({
   categoryId: z.coerce.number().int().positive().optional(),
   minPrice: z.coerce.number().nonnegative().optional(),
   maxPrice: z.coerce.number().nonnegative().optional(),
-  status: z.nativeEnum(ProductStatus).optional()
+  status: z.nativeEnum(ProductStatus).optional(),
+  sort: z.string().trim().optional(),
+  sortBy: z.string().trim().optional()
 });
 
 const productImageSchema = z.object({

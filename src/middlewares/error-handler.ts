@@ -47,10 +47,6 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   const message = err instanceof Error ? err.message : 'Internal server error';
 
   console.error('Unhandled error:', err);
-  try {
-    const fs = require('fs');
-    fs.appendFileSync('error.log', new Date().toISOString() + ' - ' + (err instanceof Error ? err.stack : String(err)) + '\n');
-  } catch(e) {}
 
   res.status(500).json({
     success: false,
